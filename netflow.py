@@ -5,6 +5,7 @@ import datetime
 import time
 from urllib import parse
 import schedule
+import shutil
 class NetflowObj:
     def __init__(self, src_ip, src_port, des_ip, des_port, bytes, proto):
         self.src_ip = src_ip
@@ -14,32 +15,53 @@ class NetflowObj:
         self.bytes = bytes
         self.proto = proto
 
-
     def __str__(self) -> str:
-        return f"{self.src_ip}:{self.src_port} -> {self.des_ip}:{self.des_port} ======{self.bytes}"
-
+        return json.dumps(self.__dict__)
+    
     def get_key(self) -> str:
         return f"{self.src_ip}:{self.des_ip}"
         # return f"{self.src_ip}_{self.des_ip}"
 
 class NetflowAggObj:
-    def __init__(self, netflowObj:NetflowObj, start_time:str, end_time:str):
-        self.src_ip = netflowObj.src_ip
-        self.des_ip = netflowObj.des_ip
+    def __init__(self, src_ip:str, des_ip:str, bytes:int, start_time:str, count:int):
+        self.src_ip = src_ip
+        self.des_ip =des_ip
         self.start_time = start_time
-        self.end_time = end_time
-        self.bytes = netflowObj.bytes
-        self.count = 1
+        self.bytes = bytes
+        self.count = count
 
-    def agg(self, netflowObj:NetflowObj) -> int:
-        self.bytes = self.bytes + netflowObj.bytes
-        self.count = self.count + 1
+    def agg(self, bytes:int, count:int) -> int:
+        self.bytes = self.bytes + bytes
+        self.count = self.count + count
         return self.bytes
+    
     def __str__(self) -> str:
-        print(self.src_ip,self.des_ip,self.bytes,self.count)
+        return json.dumps(self.__dict__)
+    
+    def get_key(self) -> str:
+        return f"{self.src_ip}:{self.des_ip}"
 
 def get_node_path(host:str):
     return host[-3:]
+
+def get_5m_filename(date_time:datetime.datetime):
+    return f'{date_time.strftime("%H-%M-%S")}.log'
+
+def get_5m_dir(host:str, date_time:datetime.datetime):
+    return os.path.join('/root/work/log',get_node_path(host=host),'5m',date_time.strftime('%Y-%m-%d'))
+
+def get_5m_path(host:str, date_time:datetime.datetime):
+    return os.path.join(get_5m_dir(host=host, date_time=date_time), get_5m_filename(date_time))
+
+def get_1h_filename(date_time:datetime.datetime):
+    return f'{date_time.strftime("%H-%M-%S")}.log'
+
+def get_1h_dir(host:str, date_time:datetime.datetime):
+    return os.path.join('/root/work/log',get_node_path(host=host),'1h',date_time.strftime('%Y-%m-%d'))
+
+def get_1h_path(host:str, date_time:datetime.datetime):
+    return os.path.join(get_1h_dir(host=host, date_time=date_time), get_1h_filename(date_time))
+
 
 def lokiapi(host: str, start: str, end: str, limit: int = None) -> list[NetflowObj]:
     try:
@@ -85,32 +107,42 @@ def agg_5m(host:str, start:str) -> list[NetflowAggObj]:
     for netflow in data:
         netflowAggObj = dic.get(netflow.get_key(), None)
         if netflowAggObj is None:
-            dic[netflow.get_key()] = NetflowAggObj(netflow, start, end)
+            dic[netflow.get_key()] = NetflowAggObj(
+                    src_ip=netflow.src_ip,
+                    des_ip=netflow.des_ip,
+                    bytes=netflow.bytes,
+                    start_time=start,
+                    count=1
+                )
         else:
-            netflowAggObj.agg(netflow)
+            netflowAggObj.agg(bytes=netflow.bytes, count=1)
     return list(dic.values())
     # draw.count_pic(data=data, xlabel="bytes(power of 10)", ylabel="count", title="5min", filename="5min.png")
 def agg_1h(host:str, start:str) -> list[NetflowAggObj]:
-    node_path = get_node_path(host=host)
-    log_path_dir = os.path.join('/root/work/log',
-                 get_node_path(host=host),
-                 '5m',
-                 datetime.datetime.strptime(start, '%Y-%m-%d %H:%M:%S').strftime("%Y-%m-%d")
-                 )
+    date_time = datetime.datetime.strptime(start, '%Y-%m-%d %H:%M:%S')
     dic = {}
     for i in range(12):
-        log_filename = (datetime.datetime.strptime(start, '%Y-%m-%d %H:%M:%S')+datetime.timedelta(minutes=5*i)).strftime("%H:%M:%S")+'.log'
-        log_file_path = os.path.join(log_path_dir, log_filename)
-        if not os.path.exists(log_file_path):
+        log_path = get_5m_path(host=host, date_time=date_time)
+        date_time = date_time + datetime.timedelta(minutes=5)
+        if not os.path.exists(log_path):
             continue
-        with open(log_file_path,"r") as f:
+        with open(log_path,"r") as f:
             data = f.readlines()
             for obj in data:
-                netflowAggObj=NetflowAggObj()
-                netflowAggObj.__dict__.update(json.loads(obj))
-                print(netflowAggObj)
-    # draw.count_pic(data=data, xlabel="bytes(power of 10)", ylabel="count", title="5min", filename="5min.png")
-
+                json_object = json.loads(obj)
+                netflowAggObj=NetflowAggObj(
+                    src_ip=json_object["src_ip"],
+                    des_ip=json_object["des_ip"],
+                    bytes=json_object["bytes"],
+                    start_time=start,
+                    count=json_object["count"] if "count" in json_object else 0,
+                )
+                netflowAggObj_dic = dic.get(netflowAggObj.get_key(), None)
+                if netflowAggObj_dic is None:
+                    dic[netflowAggObj.get_key()] = netflowAggObj
+                else:
+                    netflowAggObj_dic.agg(bytes=netflowAggObj.bytes, count=netflowAggObj.count)
+    return list(dic.values())
 
 def get_latest_5m_start_datetime():
     now = datetime.datetime.now()
@@ -134,26 +166,34 @@ def write_log(data:list[NetflowAggObj], path:str):
 def job_5m(host:str):
     start_datetime=get_latest_5m_start_datetime()
     data = agg_5m(host=host, start=start_datetime.strftime('%Y-%m-%d %H:%M:%S'))
-    date = start_datetime.strftime('%Y-%m-%d')
-    time = start_datetime.strftime('%H-%M-%S')
-    log_dir = os.path.join('/root/work/log','140','5m',date,f'{time}.log')
-    write_log(data=data, path=log_dir)
+    write_log(data=data, path=get_5m_path(host=host, date_time=start_datetime))
 
 def job_1h(host:str):
     start_datetime=get_latest_1h_start_datetime()
     data = agg_1h(host=host, start=start_datetime.strftime('%Y-%m-%d %H:%M:%S'))
-    date = start_datetime.strftime('%Y-%m-%d')
-    time = start_datetime.strftime('%H-%M-%S')
-    log_dir = os.path.join('/root/work/log','140','5m',date,f'{time}.log')
-    write_log(data=data, path=log_dir)
+    write_log(data=data, path=get_1h_path(host=host, date_time=start_datetime))
+
+def job_clear_local(host:str):
+    now = datetime.datetime.now()
+    base_path = '/root/work/log'
+    host_path = os.path.join(base_path,get_node_path(host=host))
+    for job_type in os.listdir(host_path):
+        for date in os.listdir(os.path.join(host_path, job_type)):
+            try:
+                date_time = datetime.datetime.strptime(date, '%Y-%m-%d')
+                if (now - date_time).days >= 1:
+                    shutil.rmtree(os.path.join(host_path, job_type, date))
+            except:
+                pass
 
 if __name__ == '__main__':
     host = "223.193.36.79:7140"
     schedule.every(5).minutes.do(job_5m, host)
+    schedule.every(1).hours.do(job_1h, host)
+    schedule.every(1).days.do(job_clear_local, host)
     while True:
         schedule.run_pending()
         time.sleep(1)
-
 # http://223.193.36.79:7140/loki/api/v1/query_range?query={job=%22netflow%22}?start=1700619300.0&end=1700619600.0&limit=1000000
 # 103012
 # 75806
